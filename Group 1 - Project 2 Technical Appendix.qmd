@@ -1,0 +1,141 @@
+---
+title: "Group 1 - Project 2 - Technical Appendix"
+author: "Barakat Adigun, Blessing Anoroh, Denise Atherley, Brandon Chanderban"
+format: docx
+editor: visual
+---
+
+## Appendix A: R-Code Implementation
+
+Below is the R-Code implementation for pH Predictive Modeling. Running this R script will automatically generate the pH_Predictions_Evaluation.csv file required for this project.
+
+### Data Loading
+
+The first technical step needed is to ensure that all of the required libraries and data are loaded so the program can read and execute the necessary actions. The raw "StudentData - TO MODEL" file as well as the "StudentEvaluation - TO PREDICT" file were added to a public repository for each reproducibility..
+
+```{r}
+# Load required libraries
+library(dplyr)
+library(tidyr)
+library(randomForest)
+library(ggplot2)
+
+# Load Data from GitHub (CSV)
+url_model <- "https://raw.githubusercontent.com/DRA-SPS27/DATA-624---Group-1-Project-2/refs/heads/main/StudentData%20-%20TO%20MODEL.csv"
+url_predict <- "https://raw.githubusercontent.com/DRA-SPS27/DATA-624---Group-1-Project-2/refs/heads/main/StudentEvaluation-%20TO%20PREDICT.csv"
+
+# Load the data
+model_data <- read.csv(url_model, check.names = FALSE)
+predict_data <- read.csv(url_predict, check.names = FALSE)
+
+# Replace spaces with underscores in all column names
+colnames(model_data) <- gsub(" ", "_", colnames(model_data))
+colnames(predict_data) <- gsub(" ", "_", colnames(predict_data))
+```
+
+### Data Preprocessing and Imputation Function
+
+The production data contains gaps and some sensor failures. To handle missing values and ensure the model can process "never-seen" inputs gracefully, a robust central tendency imputation strategy was applied. Numeric missing values were replaced with the training data's median, while missing categorical values (such as Brand Code) were replaced with the mode. This ensures continuous, uninterrupted scoring in a live production environment.
+
+```{r}
+# Utilizes median for numeric and mode for categorical to handle unseen inputs safely.
+preprocess_data <- function(df, is_training = TRUE, preproc_params = NULL) {
+  
+  df$`Brand_Code` <- as.factor(df$`Brand_Code`)
+  
+  if (is_training) {
+    # Remove rows where target pH is missing in training
+    df <- df %>% filter(!is.na(PH))
+    
+    num_vars <- sapply(df, is.numeric)
+    num_vars["PH"] <- FALSE 
+    
+    medians <- apply(df[, num_vars], 2, median, na.rm = TRUE)
+    
+    get_mode <- function(v) {
+      uniqv <- unique(v[!is.na(v)])
+      uniqv[which.max(tabulate(match(v, uniqv)))]
+    }
+    brand_mode <- get_mode(df$`Brand_Code`)
+    
+    preproc_params <- list(medians = medians, brand_mode = brand_mode)
+  }
+  
+  # Apply Imputation
+  df$`Brand_Code`[is.na(df$`Brand_Code`)] <- preproc_params$brand_mode
+  
+  num_vars <- sapply(df, is.numeric)
+  if("PH" %in% names(num_vars)) num_vars["PH"] <- FALSE
+  
+  for (col in names(preproc_params$medians)) {
+    if (col %in% colnames(df)) {
+      df[[col]][is.na(df[[col]])] <- preproc_params$medians[[col]]
+    }
+  }
+  
+  if (is_training) {
+    return(list(data = df, params = preproc_params))
+  } else {
+    return(df)
+  }
+}
+```
+
+### Process Datasets
+
+Once preprocessing is complete, the datasets were processed to include a training set.
+
+```{r}
+# Process Datasets
+prep_results <- preprocess_data(model_data, is_training = TRUE)
+train_clean <- prep_results$data
+impute_params <- prep_results$params
+
+eval_clean <- preprocess_data(predict_data, is_training = FALSE, preproc_params = impute_params)
+```
+
+### Model Training
+
+A Random Forest Regressor was utilized to predict pH. This algorithm constructs a multitude of decision trees during training and outputs the average prediction. It was selected because it naturally captures complex, non-linear relationships between variables and is highly resistant to overfitting, making it ideal for high-stakes manufacturing environments.
+
+```{r}
+# Model Training (Random Forest)
+set.seed(42)
+rf_model <- randomForest(PH ~ ., data = train_clean, ntree = 100, importance = TRUE)
+```
+
+### Variable Importance Visualization
+
+The Random Forest model provides a clear hierarchy of feature importance.
+
+```{r}
+# Variable Importance Visualization
+imp <- as.data.frame(importance(rf_model))
+imp$Feature <- rownames(imp)
+imp <- imp %>% arrange(desc(`%IncMSE`)) %>% head(10)
+
+print(
+  ggplot(imp, aes(x = reorder(Feature, `%IncMSE`), y = `%IncMSE`)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    coord_flip() +
+    theme_minimal() +
+    labs(title = "Top 10 Predictors of Beverage pH", x = "Feature", y = "Importance (% Increase in MSE)")
+)
+
+```
+
+### Scoring and Predictions
+
+Using the Random Forest model, predictions can be made about the data. These predictions will be appended to the evaluation dataset and the results exported into a clean .csv file.
+
+```{r}
+# Scoring / Predictions
+predictions <- predict(rf_model, newdata = eval_clean)
+
+# Append predictions to the evaluation dataset
+predict_data$PH_Predicted <- predictions
+
+# Export Results
+write.csv(predict_data, "pH_Predictions_Evaluation(R).csv", row.names = FALSE)
+cat("Predictions successfully saved to pH_Predictions_Evaluation(R).csv")
+```
